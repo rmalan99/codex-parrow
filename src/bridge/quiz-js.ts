@@ -13,6 +13,16 @@ export const INJECT_STYLE = `
 
 export const EXTRACT_QUESTIONS = `
 (function(){
+  function escapeSelector(value){
+    if (typeof value !== "string") return "";
+    if (window.CSS && typeof window.CSS.escape === "function") {
+      return window.CSS.escape(value);
+    }
+    return value.replace(/[^a-zA-Z0-9_-]/g, function(char){
+      return "\\\\" + char;
+    });
+  }
+
   function cssPath(element){
     if (!(element instanceof Element)) return null;
     const path = [];
@@ -20,7 +30,7 @@ export const EXTRACT_QUESTIONS = `
     while (current && current.nodeType === 1 && path.length < 6) {
       let selector = current.nodeName.toLowerCase();
       if (current.id) {
-        selector += "#" + CSS.escape(current.id);
+        selector += "#" + escapeSelector(current.id);
         path.unshift(selector);
         break;
       }
@@ -51,7 +61,7 @@ export const EXTRACT_QUESTIONS = `
     }
     groups.get(groupKey).options.push({
       text: (label?.innerText || input.value || "").trim(),
-      selector: input.id ? "#" + CSS.escape(input.id) : cssPath(input),
+      selector: input.id ? "#" + escapeSelector(input.id) : cssPath(input),
       labelSelector: label ? cssPath(label) : null
     });
   });

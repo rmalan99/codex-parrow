@@ -15,7 +15,10 @@ import {
 } from "@ionic/react";
 import { Capacitor } from "@capacitor/core";
 import OpenAI from "openai";
-import type { NativeWebViewPlugin } from "../capacitor-plugins/native-webview";
+import type {
+  EvalResult,
+  NativeWebViewPlugin,
+} from "../capacitor-plugins/native-webview";
 import { INJECT_STYLE, EXTRACT_QUESTIONS, PAINT_HIGHLIGHTS } from "../bridge/quiz-js";
 import "./Home.css";
 
@@ -194,6 +197,7 @@ const solveQuizWithOpenAI = async (
   try {
     parsed = JSON.parse(rawOutput);
   } catch (error) {
+    console.error("OpenAI respondio sin JSON valido", error, rawOutput);
     throw new Error("OpenAI respondio sin JSON valido");
   }
 
@@ -213,6 +217,16 @@ const Home: React.FC = () => {
       throw new Error("NativeWebView plugin no disponible. Verifica la inicializacion en main.tsx");
     }
     return window.NativeWebView;
+  };
+
+  const unwrapEvalString = (result: EvalResult | undefined, context: string): string => {
+    if (!result || typeof result.value !== "string") {
+      throw new Error(`El WebView no entrego datos validos al ${context}`);
+    }
+    if (result.value.startsWith("ERR:")) {
+      throw new Error(`El WebView reporto un error al ${context}: ${result.value.slice(4)}`);
+    }
+    return result.value;
   };
 
   const openUrl = async () => {
@@ -253,7 +267,7 @@ const Home: React.FC = () => {
         const plugin = ensurePlugin();
         setStatus("Extrayendo preguntas...");
         const extractRes = await plugin.evalJs({ js: EXTRACT_QUESTIONS });
-        const rawPayload = extractRes?.value ? JSON.parse(extractRes.value) : null;
+        const rawPayload = JSON.parse(unwrapEvalString(extractRes, "extraer preguntas"));
         if (!isExtractedPayload(rawPayload)) {
           throw new Error("No se pudieron obtener preguntas del WebView");
         }
@@ -261,7 +275,10 @@ const Home: React.FC = () => {
         setStatus("Consultando OpenAI...");
         const answers = await solveQuizWithOpenAI(client, rawPayload, OPENAI_MODEL);
         setStatus("Resaltando respuestas...");
-        await plugin.evalJs({ js: PAINT_HIGHLIGHTS(JSON.stringify(answers)) });
+        const highlightRes = await plugin.evalJs({
+          js: PAINT_HIGHLIGHTS(JSON.stringify(answers)),
+        });
+        unwrapEvalString(highlightRes, "resaltar respuestas");
         setStatus(`Resaltadas ${answers.length} respuestas`);
         return;
       }
