@@ -1,0 +1,7 @@
+{
+  "name": "ionic-quiz-helper",
+  "integrations": {
+    "capacitor": {}
+  },
+  "type": "react-vite"
+}
