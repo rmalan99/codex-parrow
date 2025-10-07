@@ -1,6 +1,6 @@
 ﻿import { registerPlugin } from "@capacitor/core";
 
-type EvalResult = { value: string };
+export type EvalResult = { value?: string | null };
 
 export interface NativeWebViewPlugin {
   open(options: { url: string }): Promise<void>;
