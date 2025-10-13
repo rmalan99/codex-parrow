@@ -1,6 +1,7 @@
-﻿import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import {
   IonButton,
+  IonButtons,
   IonContent,
   IonHeader,
   IonInput,
@@ -17,6 +18,7 @@ import { Capacitor } from "@capacitor/core";
 import OpenAI from "openai";
 import type {
   EvalResult,
+  NativeViewport,
   NativeWebViewPlugin,
 } from "../capacitor-plugins/native-webview";
 import { INJECT_STYLE, EXTRACT_QUESTIONS, PAINT_HIGHLIGHTS } from "../bridge/quiz-js";
@@ -209,6 +211,25 @@ const Home: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [webAnswers, setWebAnswers] = useState<Answer[]>([]);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [webViewReady, setWebViewReady] = useState(false);
+
+  const buildViewport = (): NativeViewport | undefined => {
+    const element = containerRef.current;
+    if (!element) {
+      return undefined;
+    }
+    const rect = element.getBoundingClientRect();
+    const viewport: NativeViewport = {
+      x: rect.left,
+      y: rect.top,
+      width: rect.width,
+      height: rect.height,
+      devicePixelRatio:
+        typeof window !== "undefined" && window.devicePixelRatio ? window.devicePixelRatio : 1,
+    };
+    return viewport;
+  };
 
   const isNativePlatform = Capacitor.isNativePlatform();
 
@@ -234,10 +255,18 @@ const Home: React.FC = () => {
       setWebAnswers([]);
       if (isNativePlatform) {
         const plugin = ensurePlugin();
+        const viewport = buildViewport();
+        if (!viewport) {
+          setStatus("No se encontro contenedor para el WebView");
+          return;
+        }
+
         setStatus("Abriendo URL en WebView...");
-        await plugin.open({ url });
+        setWebViewReady(false);
+        await plugin.open({ url, viewport });
         await plugin.evalJs({ js: INJECT_STYLE });
         setStatus("Pagina lista en el WebView");
+        setWebViewReady(true);
         return;
       }
 
@@ -317,6 +346,18 @@ const Home: React.FC = () => {
       <IonHeader>
         <IonToolbar>
           <IonTitle>Quiz Helper</IonTitle>
+          <IonButtons slot="end">
+            <IonButton onClick={analyze} disabled={loading}>
+              {loading ? (
+                <>
+                  <IonSpinner name="dots" className="ion-margin-end" />
+                  Escaneando...
+                </>
+              ) : (
+                "Escanear pagina"
+              )}
+            </IonButton>
+          </IonButtons>
         </IonToolbar>
       </IonHeader>
       <IonContent className="ion-padding">
@@ -332,22 +373,16 @@ const Home: React.FC = () => {
           <IonButton expand="block" onClick={openUrl} disabled={loading}>
             Abrir
           </IonButton>
-          <IonButton
-            expand="block"
-            color="success"
-            onClick={analyze}
-            disabled={loading}
-          >
-            {loading ? (
-              <>
-                <IonSpinner name="dots" className="ion-margin-end" />
-                Analizando...
-              </>
-            ) : (
-              "Analizar y resaltar"
-            )}
-          </IonButton>
         </div>
+        {isNativePlatform && (
+          <div ref={containerRef} className="webview-container ion-margin-top">
+            {!webViewReady && (
+              <div className="webview-placeholder">
+                Presiona "Abrir" para cargar el quiz en esta vista.
+              </div>
+            )}
+          </div>
+        )}
         {status && (
           <IonNote color="medium" className="ion-margin-top status-note">
             {status}
@@ -378,3 +413,4 @@ const Home: React.FC = () => {
 };
 
 export default Home;
+

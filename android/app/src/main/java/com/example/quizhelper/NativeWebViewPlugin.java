@@ -1,10 +1,16 @@
 package com.example.quizhelper;
 
 import android.annotation.SuppressLint;
+import android.os.Build;
 import android.net.Uri;
+import android.util.DisplayMetrics;
+import android.view.Gravity;
+import android.view.View;
 import android.view.ViewGroup;
+import android.widget.FrameLayout;
 import android.view.ViewParent;
 import android.webkit.WebView;
+import android.webkit.WebSettings;
 import android.webkit.WebViewClient;
 
 import androidx.activity.OnBackPressedCallback;
@@ -23,6 +29,7 @@ public class NativeWebViewPlugin extends Plugin {
 
   private WebView webView;
   private OnBackPressedCallback backPressedCallback;
+  private ViewportSpec lastViewport;
 
   @Override
   public void load() {
@@ -50,12 +57,19 @@ public class NativeWebViewPlugin extends Plugin {
       return;
     }
 
+    JSObject viewportObject = call.getObject("viewport", null);
+    final ViewportSpec viewportSpec = parseViewport(viewportObject);
+
     if (!runOnUiThreadSafe(() -> {
+      lastViewport = viewportSpec;
       ensureWebView();
-      if (webView != null) {
-        webView.stopLoading();
-        webView.loadUrl(url);
+      if (webView == null || webView.getParent() == null) {
+        call.reject("webview unavailable");
+        return;
       }
+      applyViewportLayout(lastViewport);
+      webView.stopLoading();
+      webView.loadUrl(url);
       call.resolve();
     })) {
       call.reject("activity unavailable");
@@ -72,7 +86,7 @@ public class NativeWebViewPlugin extends Plugin {
 
     if (!runOnUiThreadSafe(() -> {
       ensureWebView();
-      if (webView == null) {
+      if (webView == null || webView.getParent() == null) {
         call.reject("webview not ready");
         return;
       }
@@ -116,31 +130,147 @@ public class NativeWebViewPlugin extends Plugin {
     }
   }
 
+  private static final class ViewportSpec {
+    final Integer left;
+    final Integer top;
+    final Integer width;
+    final Integer height;
+
+    ViewportSpec(Integer left, Integer top, Integer width, Integer height) {
+      this.left = left;
+      this.top = top;
+      this.width = width;
+      this.height = height;
+    }
+  }
+
+  private Double optNullableDouble(JSObject viewport, String key) {
+    if (viewport == null) {
+      return null;
+    }
+    double value = viewport.optDouble(key, Double.NaN);
+    return Double.isNaN(value) ? null : value;
+  }
+
+  private ViewportSpec parseViewport(JSObject viewport) {
+    if (viewport == null) {
+      return null;
+    }
+
+    Double xValue = optNullableDouble(viewport, "x");
+    Double yValue = optNullableDouble(viewport, "y");
+    Double widthValue = optNullableDouble(viewport, "width");
+    Double heightValue = optNullableDouble(viewport, "height");
+    Double ratioValue = optNullableDouble(viewport, "devicePixelRatio");
+
+    float density = 1f;
+    if (getContext() != null && getContext().getResources() != null) {
+      DisplayMetrics metrics = getContext().getResources().getDisplayMetrics();
+      if (metrics != null && metrics.density > 0f) {
+        density = metrics.density;
+      }
+    }
+
+    float scale = ratioValue != null && ratioValue > 0 ? ratioValue.floatValue() : density;
+    if (scale <= 0f) {
+      scale = 1f;
+    }
+
+    Integer left = xValue != null ? Math.round(xValue.floatValue() * scale) : null;
+    Integer top = yValue != null ? Math.round(yValue.floatValue() * scale) : null;
+    Integer width = widthValue != null ? Math.round(widthValue.floatValue() * scale) : null;
+    Integer height = heightValue != null ? Math.round(heightValue.floatValue() * scale) : null;
+
+    return new ViewportSpec(left, top, width, height);
+  }
+
+  private void applyViewportLayout(ViewportSpec viewport) {
+    if (webView == null) {
+      return;
+    }
+
+    ViewParent parent = webView.getParent();
+    if (!(parent instanceof ViewGroup)) {
+      return;
+    }
+
+    ViewGroup container = (ViewGroup) parent;
+    int width = viewport != null && viewport.width != null && viewport.width > 0
+      ? viewport.width
+      : ViewGroup.LayoutParams.MATCH_PARENT;
+    int height = viewport != null && viewport.height != null && viewport.height > 0
+      ? viewport.height
+      : ViewGroup.LayoutParams.MATCH_PARENT;
+
+    ViewGroup.MarginLayoutParams params;
+    if (container instanceof FrameLayout) {
+      FrameLayout.LayoutParams frameParams = new FrameLayout.LayoutParams(width, height);
+      frameParams.gravity = Gravity.TOP | Gravity.START;
+      params = frameParams;
+    } else {
+      params = new ViewGroup.MarginLayoutParams(width, height);
+    }
+
+    params.leftMargin = viewport != null && viewport.left != null ? Math.max(viewport.left, 0) : 0;
+    params.topMargin = viewport != null && viewport.top != null ? Math.max(viewport.top, 0) : 0;
+    params.rightMargin = 0;
+    params.bottomMargin = 0;
+
+    webView.setLayoutParams(params);
+    webView.bringToFront();
+    webView.requestLayout();
+  }
   @SuppressLint("SetJavaScriptEnabled")
   private void ensureWebView() {
     if (webView == null) {
       webView = new WebView(getContext());
-      webView.getSettings().setJavaScriptEnabled(true);
-      webView.getSettings().setDomStorageEnabled(true);
+      WebSettings settings = webView.getSettings();
+      settings.setJavaScriptEnabled(true);
+      settings.setDomStorageEnabled(true);
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+        settings.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
+      }
       webView.setWebViewClient(new WebViewClient());
     }
 
-    WebView hostWebView = getBridge().getWebView();
-    ViewGroup parent = hostWebView != null ? (ViewGroup) hostWebView.getParent() : null;
-    if (parent != null && webView.getParent() != parent) {
-      if (webView.getParent() instanceof ViewGroup) {
-        ((ViewGroup) webView.getParent()).removeView(webView);
+    ViewGroup parent = findWebViewContainer();
+    if (parent != null) {
+      if (webView.getParent() != parent) {
+        if (webView.getParent() instanceof ViewGroup) {
+          ((ViewGroup) webView.getParent()).removeView(webView);
+        }
+        parent.addView(
+          webView,
+          new ViewGroup.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+          )
+        );
       }
-      parent.addView(
-        webView,
-        new ViewGroup.LayoutParams(
-          ViewGroup.LayoutParams.MATCH_PARENT,
-          ViewGroup.LayoutParams.MATCH_PARENT
-        )
-      );
+      applyViewportLayout(lastViewport);
     }
 
     registerBackHandler();
+  }
+
+  private ViewGroup findWebViewContainer() {
+    WebView hostWebView = getBridge().getWebView();
+    if (hostWebView != null) {
+      ViewParent hostParent = hostWebView.getParent();
+      if (hostParent instanceof ViewGroup) {
+        return (ViewGroup) hostParent;
+      }
+    }
+
+    AppCompatActivity activity = getActivity();
+    if (activity != null) {
+      View contentView = activity.findViewById(android.R.id.content);
+      if (contentView instanceof ViewGroup) {
+        return (ViewGroup) contentView;
+      }
+    }
+
+    return null;
   }
 
   private void registerBackHandler() {
@@ -177,6 +307,7 @@ public class NativeWebViewPlugin extends Plugin {
       webView.onPause();
       webView.destroy();
       webView = null;
+      lastViewport = null;
     }
 
     if (backPressedCallback != null) {
@@ -194,3 +325,12 @@ public class NativeWebViewPlugin extends Plugin {
     return true;
   }
 }
+
+
+
+
+
+
+
+
+

@@ -511,3 +511,7 @@ Puedo prepararte:
 * `.http` o `REST Client` para probar `/solve`.
 
 Dime si prefieres **Angular** y lo ajusto al stack que uses mÃ¡s.
+
+## Android WebView notas
+- 2025-10-09: Se habilito `android:usesCleartextTraffic` en el manifest para permitir quizzes HTTP durante las pruebas. Considera definir un `network_security_config` acotado antes de liberar.
+- 2025-10-09: El plugin nativo ahora posiciona el WebView usando las coordenadas del contenedor en Home.tsx para mantener el header visible.
