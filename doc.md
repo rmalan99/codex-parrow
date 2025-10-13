@@ -208,55 +208,12 @@ export default Home;
 
 Crea un **Capacitor Plugin** simple para manejar un **WebView propio**.
 
-**Android**: `android/app/src/main/java/.../NativeWebViewPlugin.kt`
+**Android**: `android/app/src/main/java/com/example/quizhelper/NativeWebViewPlugin.java`
 
-```kotlin
-package com.example.app
-
-import android.annotation.SuppressLint
-import android.webkit.JavascriptInterface
-import android.webkit.WebView
-import android.webkit.WebViewClient
-import com.getcapacitor.*
-import org.json.JSONObject
-
-@NativePlugin
-class NativeWebViewPlugin : Plugin() {
-  private lateinit var webView: WebView
-
-  @PluginMethod
-  fun open(call: PluginCall) {
-    val url = call.getString("url") ?: run { call.reject("url required"); return }
-    activity.runOnUiThread {
-      ensureWebView()
-      webView.loadUrl(url)
-      call.resolve()
-    }
-  }
-
-  @PluginMethod
-  fun evalJs(call: PluginCall) {
-    val js = call.getString("js") ?: run { call.reject("js required"); return }
-    activity.runOnUiThread {
-      webView.evaluateJavascript(js) { value ->
-        val ret = JSObject()
-        ret.put("value", value)
-        call.resolve(ret)
-      }
-    }
-  }
-
-  @SuppressLint("SetJavaScriptEnabled")
-  private fun ensureWebView() {
-    if (::webView.isInitialized) return
-    webView = WebView(context)
-    webView.settings.javaScriptEnabled = true
-    webView.settings.domStorageEnabled = true
-    webView.webViewClient = object: WebViewClient() {}
-    bridge.webViewParent.addView(webView) // muestra el WebView debajo de tu UI
-  }
-}
-```
+- Instancia un `WebView` nativo y lo monta dentro de un `FrameLayout` flotante que se posiciona usando el viewport calculado en React.
+- Emite eventos `pageLoaded` y `pageLoadFailed` para que la UI web sepa si puede habilitar el botÃ³n de generaciÃ³n.
+- Valida que solo se abran `http/https`, limpia el WebView en `onPause/onDestroy` y reutiliza el contenedor entre navegaciones.
+- El cÃ³digo relevante vive en [`NativeWebViewPlugin.java`](android/app/src/main/java/com/example/quizhelper/NativeWebViewPlugin.java).
 
 > Actualizacion: en la version Java incluida en este repo se limpian los recursos del WebView en `handleOnDestroy`, se pausan timers en `handleOnPause`/`handleOnResume`, se valida que solo se carguen URLs http/https y se usa un `OnBackPressedCallback` para delegar la navegacion atras antes de cerrar la vista.
 

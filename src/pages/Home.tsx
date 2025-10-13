@@ -1,4 +1,4 @@
-import React, { useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   IonButton,
   IonButtons,
@@ -14,7 +14,7 @@ import {
   IonTitle,
   IonToolbar,
 } from "@ionic/react";
-import { Capacitor } from "@capacitor/core";
+import { Capacitor, type PluginListenerHandle } from "@capacitor/core";
 import OpenAI from "openai";
 import type {
   EvalResult,
@@ -213,6 +213,7 @@ const Home: React.FC = () => {
   const [webAnswers, setWebAnswers] = useState<Answer[]>([]);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [webViewReady, setWebViewReady] = useState(false);
+  const listenerHandles = useRef<PluginListenerHandle[]>([]);
 
   const buildViewport = (): NativeViewport | undefined => {
     const element = containerRef.current;
@@ -240,6 +241,77 @@ const Home: React.FC = () => {
     return window.NativeWebView;
   };
 
+  useEffect(() => {
+    if (!isNativePlatform) {
+      return;
+    }
+
+    let cancelled = false;
+    const plugin = window.NativeWebView;
+    if (!plugin) {
+      setStatus("NativeWebView plugin no disponible. Verifica la inicializacion en main.tsx");
+      return;
+    }
+
+    const registerListeners = async () => {
+      try {
+        const pageLoadedHandle = await plugin.addListener("pageLoaded", async (event) => {
+          if (cancelled) {
+            return;
+          }
+          try {
+            await plugin.evalJs({ js: INJECT_STYLE });
+            setStatus(
+              event?.url ? `Pagina lista en el WebView (${event.url})` : "Pagina lista en el WebView"
+            );
+            setWebViewReady(true);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            setStatus(`La pagina cargo pero no se pudo aplicar estilos: ${message}`);
+            setWebViewReady(false);
+          }
+        });
+        if (cancelled) {
+          pageLoadedHandle.remove();
+        } else {
+          listenerHandles.current.push(pageLoadedHandle);
+        }
+
+        const pageFailedHandle = await plugin.addListener("pageLoadFailed", (event) => {
+          if (cancelled) {
+            return;
+          }
+          const reason = event?.message ?? "motivo desconocido";
+          setStatus(`Fallo la carga en el WebView: ${reason}`);
+          setWebViewReady(false);
+        });
+        if (cancelled) {
+          pageFailedHandle.remove();
+        } else {
+          listenerHandles.current.push(pageFailedHandle);
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error("No se pudieron registrar listeners del WebView nativo", message);
+        setStatus("No se pudieron registrar eventos del WebView nativo");
+      }
+    };
+
+    registerListeners();
+
+    return () => {
+      cancelled = true;
+      listenerHandles.current.forEach((handle) => {
+        try {
+          handle.remove();
+        } catch (error) {
+          console.warn("Fallo al remover listener del WebView", error);
+        }
+      });
+      listenerHandles.current = [];
+    };
+  }, [isNativePlatform]);
+
   const unwrapEvalString = (result: EvalResult | undefined, context: string): string => {
     if (!result || typeof result.value !== "string") {
       throw new Error(`El WebView no entrego datos validos al ${context}`);
@@ -264,9 +336,7 @@ const Home: React.FC = () => {
         setStatus("Abriendo URL en WebView...");
         setWebViewReady(false);
         await plugin.open({ url, viewport });
-        await plugin.evalJs({ js: INJECT_STYLE });
-        setStatus("Pagina lista en el WebView");
-        setWebViewReady(true);
+        setStatus("Cargando la pagina dentro del WebView...");
         return;
       }
 
@@ -283,6 +353,10 @@ const Home: React.FC = () => {
 
   const analyze = async () => {
     try {
+      if (isNativePlatform && !webViewReady) {
+        setStatus("Espera a que la pagina cargue antes de generar respuestas");
+        return;
+      }
       setLoading(true);
       setWebAnswers([]);
 

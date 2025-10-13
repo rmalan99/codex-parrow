@@ -1,17 +1,20 @@
 package com.example.quizhelper;
 
 import android.annotation.SuppressLint;
-import android.os.Build;
+import android.content.Context;
 import android.net.Uri;
+import android.os.Build;
 import android.util.DisplayMetrics;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
-import android.widget.FrameLayout;
 import android.view.ViewParent;
-import android.webkit.WebView;
+import android.webkit.WebResourceError;
+import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
+import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.widget.FrameLayout;
 
 import androidx.activity.OnBackPressedCallback;
 import androidx.appcompat.app.AppCompatActivity;
@@ -30,6 +33,11 @@ public class NativeWebViewPlugin extends Plugin {
   private WebView webView;
   private OnBackPressedCallback backPressedCallback;
   private ViewportSpec lastViewport;
+  private FrameLayout overlayContainer;
+  private String pendingNavigationUrl;
+
+  private static final String EVENT_PAGE_LOADED = "pageLoaded";
+  private static final String EVENT_PAGE_LOAD_FAILED = "pageLoadFailed";
 
   @Override
   public void load() {
@@ -62,13 +70,21 @@ public class NativeWebViewPlugin extends Plugin {
 
     if (!runOnUiThreadSafe(() -> {
       lastViewport = viewportSpec;
-      ensureWebView();
-      if (webView == null || webView.getParent() == null) {
+      if (!ensureWebView()) {
         call.reject("webview unavailable");
         return;
       }
+      if (webView == null) {
+        call.reject("webview unavailable");
+        return;
+      }
+      if (overlayContainer != null) {
+        overlayContainer.setVisibility(View.VISIBLE);
+        overlayContainer.bringToFront();
+      }
       applyViewportLayout(lastViewport);
       webView.stopLoading();
+      pendingNavigationUrl = url;
       webView.loadUrl(url);
       call.resolve();
     })) {
@@ -85,8 +101,11 @@ public class NativeWebViewPlugin extends Plugin {
     }
 
     if (!runOnUiThreadSafe(() -> {
-      ensureWebView();
-      if (webView == null || webView.getParent() == null) {
+      if (!ensureWebView()) {
+        call.reject("webview not ready");
+        return;
+      }
+      if (webView == null) {
         call.reject("webview not ready");
         return;
       }
@@ -220,57 +239,161 @@ public class NativeWebViewPlugin extends Plugin {
     webView.bringToFront();
     webView.requestLayout();
   }
+
+  private boolean isSupportedScheme(String scheme) {
+    if (scheme == null) {
+      return false;
+    }
+    String normalized = scheme.toLowerCase(Locale.ROOT);
+    return normalized.equals("http") || normalized.equals("https");
+  }
+
+  private void handleLoadError(CharSequence description, Integer code, Uri uri) {
+    String message = description != null ? description.toString() : "Error desconocido";
+    JSObject payload = new JSObject();
+    if (uri != null) {
+      payload.put("url", uri.toString());
+    }
+    payload.put("message", message);
+    if (code != null) {
+      payload.put("code", code);
+    }
+    pendingNavigationUrl = null;
+    notifyListeners(EVENT_PAGE_LOAD_FAILED, payload, true);
+  }
+
+  private final class NativeWebViewClient extends WebViewClient {
+    @Override
+    public void onPageFinished(WebView view, String url) {
+      super.onPageFinished(view, url);
+      pendingNavigationUrl = null;
+      JSObject payload = new JSObject();
+      payload.put("url", url);
+      notifyListeners(EVENT_PAGE_LOADED, payload, true);
+    }
+
+    @Override
+    @SuppressLint("NewApi")
+    public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+      if (request == null) {
+        return false;
+      }
+      Uri uri = request.getUrl();
+      if (uri == null) {
+        return false;
+      }
+      if (isSupportedScheme(uri.getScheme())) {
+        pendingNavigationUrl = uri.toString();
+        return false;
+      }
+      return true;
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public boolean shouldOverrideUrlLoading(WebView view, String url) {
+      if (url == null) {
+        return false;
+      }
+      Uri uri = Uri.parse(url);
+      if (uri == null) {
+        return false;
+      }
+      if (isSupportedScheme(uri.getScheme())) {
+        pendingNavigationUrl = uri.toString();
+        return false;
+      }
+      return true;
+    }
+
+    @Override
+    public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
+      if (request != null && request.isForMainFrame()) {
+        Uri failingUri = request.getUrl();
+        Integer code = error != null ? error.getErrorCode() : null;
+        CharSequence description = error != null ? error.getDescription() : null;
+        handleLoadError(description, code, failingUri);
+      }
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void onReceivedError(WebView view, int errorCode, String description, String failingUrl) {
+      Uri failingUri = failingUrl != null ? Uri.parse(failingUrl) : null;
+      handleLoadError(description, errorCode, failingUri);
+    }
+  }
   @SuppressLint("SetJavaScriptEnabled")
-  private void ensureWebView() {
+  private boolean ensureWebView() {
     if (webView == null) {
-      webView = new WebView(getContext());
+      Context context = getContext();
+      if (context == null) {
+        return false;
+      }
+      webView = new WebView(context);
       WebSettings settings = webView.getSettings();
       settings.setJavaScriptEnabled(true);
       settings.setDomStorageEnabled(true);
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
       }
-      webView.setWebViewClient(new WebViewClient());
+      webView.setWebViewClient(new NativeWebViewClient());
     }
 
-    ViewGroup parent = findWebViewContainer();
-    if (parent != null) {
-      if (webView.getParent() != parent) {
-        if (webView.getParent() instanceof ViewGroup) {
-          ((ViewGroup) webView.getParent()).removeView(webView);
-        }
-        parent.addView(
-          webView,
-          new ViewGroup.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.MATCH_PARENT
-          )
-        );
+    FrameLayout container = ensureOverlayContainer();
+    if (container == null) {
+      return false;
+    }
+
+    if (webView.getParent() != container) {
+      if (webView.getParent() instanceof ViewGroup) {
+        ((ViewGroup) webView.getParent()).removeView(webView);
       }
-      applyViewportLayout(lastViewport);
+      FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+        ViewGroup.LayoutParams.MATCH_PARENT,
+        ViewGroup.LayoutParams.MATCH_PARENT
+      );
+      params.gravity = Gravity.TOP | Gravity.START;
+      container.addView(webView, params);
     }
 
+    webView.setVisibility(View.VISIBLE);
+    applyViewportLayout(lastViewport);
     registerBackHandler();
+    return true;
   }
 
-  private ViewGroup findWebViewContainer() {
-    WebView hostWebView = getBridge().getWebView();
-    if (hostWebView != null) {
-      ViewParent hostParent = hostWebView.getParent();
-      if (hostParent instanceof ViewGroup) {
-        return (ViewGroup) hostParent;
-      }
-    }
-
+  private FrameLayout ensureOverlayContainer() {
     AppCompatActivity activity = getActivity();
-    if (activity != null) {
-      View contentView = activity.findViewById(android.R.id.content);
-      if (contentView instanceof ViewGroup) {
-        return (ViewGroup) contentView;
-      }
+    if (activity == null) {
+      return null;
     }
 
-    return null;
+    FrameLayout root = activity.findViewById(android.R.id.content);
+    if (root == null) {
+      return null;
+    }
+
+    if (overlayContainer == null) {
+      overlayContainer = new FrameLayout(activity);
+      overlayContainer.setClipChildren(false);
+      overlayContainer.setClipToPadding(false);
+      overlayContainer.setVisibility(View.GONE);
+    }
+
+    if (overlayContainer.getParent() != root) {
+      if (overlayContainer.getParent() instanceof ViewGroup) {
+        ((ViewGroup) overlayContainer.getParent()).removeView(overlayContainer);
+      }
+      FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+        ViewGroup.LayoutParams.MATCH_PARENT,
+        ViewGroup.LayoutParams.MATCH_PARENT
+      );
+      params.gravity = Gravity.TOP | Gravity.START;
+      root.addView(overlayContainer, params);
+    }
+
+    return overlayContainer;
   }
 
   private void registerBackHandler() {
@@ -308,6 +431,13 @@ public class NativeWebViewPlugin extends Plugin {
       webView.destroy();
       webView = null;
       lastViewport = null;
+    }
+
+    pendingNavigationUrl = null;
+
+    if (overlayContainer != null) {
+      overlayContainer.removeAllViews();
+      overlayContainer.setVisibility(View.GONE);
     }
 
     if (backPressedCallback != null) {
